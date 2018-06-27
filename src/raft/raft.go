@@ -18,7 +18,16 @@ package raft
 //
 
 import "sync"
-import "labrpc"
+import (
+	"labrpc"
+)
+
+type RoleType int
+const (
+	LEADER    RoleType = iota
+	CANDIDATE
+	FOLLOWER
+)
 
 // import "bytes"
 // import "labgob"
@@ -40,6 +49,10 @@ type ApplyMsg struct {
 	CommandIndex int
 }
 
+type LogEntry struct {
+	Term  int
+	Index int
+}
 //
 // A Go object implementing a single Raft peer.
 //
@@ -52,17 +65,23 @@ type Raft struct {
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
-
+	//TODO:
+	currentTerm	int
+	votedFor	int
+	log			[]LogEntry
+	
+	role 		RoleType
 }
 
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
 
-	var term int
-	var isleader bool
+	//var term int
+	//var isleader bool
 	// Your code here (2A).
-	return term, isleader
+
+	return rf.currentTerm, rf.role == LEADER
 }
 
 //
@@ -109,6 +128,10 @@ func (rf *Raft) readPersist(data []byte) {
 //
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
+	Term         int
+	CandidateId  int
+	LastLogIndex int
+	LastLogTerm  int
 }
 
 //
@@ -117,6 +140,8 @@ type RequestVoteArgs struct {
 //
 type RequestVoteReply struct {
 	// Your data here (2A).
+	Term        int
+	VoteGranted bool
 }
 
 //
@@ -124,6 +149,22 @@ type RequestVoteReply struct {
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
+	//TODO:
+	lastLogTerm := rf.getLastLogTerm()
+	lastLogIndex := rf.getLastLogIndex()
+	if args.Term < rf.currentTerm {
+		reply.Term = rf.currentTerm
+		reply.VoteGranted = false
+		return
+	}
+	if args.Term > rf.currentTerm {
+		rf.role = FOLLOWER;
+	}
+	if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) &&
+		(args.LastLogTerm > lastLogTerm || (args.LastLogTerm == lastLogTerm && args.LastLogIndex > lastLogIndex)) {
+
+	}
+
 }
 
 //
@@ -160,6 +201,40 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	return ok
 }
 
+
+type AppendEntriesArgs struct {
+	Term         int
+	LeaderId     int
+	PervLogIndex int
+	PrevLogTerm  int
+	Entries      []LogEntry
+	LeaderCommit int
+}
+
+type AppendEntriesReply struct {
+	Term    int
+	Success bool
+}
+
+func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+
+	//TODO:
+	if args.Term > rf.currentTerm {
+		rf.role = FOLLOWER;
+	}
+}
+
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+	return ok
+}
+
+func (rf *Raft) getLastLogTerm() int {
+	return rf.log[len(rf.log) - 1].Term
+}
+func (rf *Raft) getLastLogIndex() int {
+	return rf.log[len(rf.log) - 1].Index
+}
 //
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
@@ -193,6 +268,22 @@ func (rf *Raft) Kill() {
 	// Your code here, if desired.
 }
 
+func (rf *Raft) startElection() {
+
+}
+
+func (rf *Raft) electionDaemon() {
+	for {
+		swith rf.role {
+			case LEADER
+		}
+	}
+}
+
+func (rf *Raft) heartbeatDaemon() {
+
+}
+
 //
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
@@ -212,6 +303,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here (2A, 2B, 2C).
+	//TODO:
+
+	go rf.electionDaemon()
+	go rf.heartbeatDaemon()
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
