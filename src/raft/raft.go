@@ -20,6 +20,8 @@ package raft
 import "sync"
 import (
 	"labrpc"
+	"time"
+	"math/rand"
 )
 
 type RoleType int
@@ -28,6 +30,8 @@ const (
 	CANDIDATE
 	FOLLOWER
 )
+
+const HEARTBEAT_INTERVAL = 100
 
 // import "bytes"
 // import "labgob"
@@ -69,8 +73,16 @@ type Raft struct {
 	currentTerm	int
 	votedFor	int
 	log			[]LogEntry
-	
+
+	commitIndex	int
+	lastApplied	int
+
 	role 		RoleType
+
+	votesReceived	int
+	appendEntriesCh	chan bool
+	grantVoteCh		chan bool
+	becomeLeaderCh	chan bool
 }
 
 // return currentTerm and whether this server
@@ -149,22 +161,22 @@ type RequestVoteReply struct {
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
-	//TODO:
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	lastLogTerm := rf.getLastLogTerm()
 	lastLogIndex := rf.getLastLogIndex()
-	if args.Term < rf.currentTerm {
-		reply.Term = rf.currentTerm
-		reply.VoteGranted = false
-		return
+	rf.checkConvertToFollower(args.Term)
+	reply.VoteGranted = false
+	//DPrintf("%v %v %v %v %v %v", rf.me, args.CandidateId, args.Term, rf.currentTerm, rf.votedFor, )
+	if args.Term >= rf.currentTerm &&
+		(rf.votedFor == -1 || rf.votedFor == args.CandidateId) &&
+		(args.LastLogTerm > lastLogTerm || (args.LastLogTerm == lastLogTerm && args.LastLogIndex >= lastLogIndex)) {
+			DPrintf("%v grant vote to %v", rf.me, args.CandidateId)
+			reply.VoteGranted = true
+			rf.votedFor = args.CandidateId
+			dropAndSet(rf.grantVoteCh)
 	}
-	if args.Term > rf.currentTerm {
-		rf.role = FOLLOWER;
-	}
-	if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) &&
-		(args.LastLogTerm > lastLogTerm || (args.LastLogTerm == lastLogTerm && args.LastLogIndex > lastLogIndex)) {
-
-	}
-
+	reply.Term = rf.currentTerm
 }
 
 //
@@ -201,11 +213,42 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	return ok
 }
 
+func (rf *Raft) broadcastRequestVote()  {
+	//TODO:
+	args := RequestVoteArgs{
+		Term:rf.currentTerm,
+		CandidateId:rf.me,
+		LastLogIndex:rf.getLastLogIndex(),
+		LastLogTerm:rf.getLastLogTerm(),
+	}
+	rf.votesReceived = 1
+	for i := range rf.peers {
+		if i == rf.me {
+			continue
+		}
+		go func(ind int){
+			reply := RequestVoteReply{}
+			rf.sendRequestVote(ind, &args, &reply)
+			rf.mu.Lock()
+			rf.checkConvertToFollower(reply.Term)
+			if rf.role == CANDIDATE && rf.currentTerm == reply.Term{
+				if reply.VoteGranted {
+					rf.votesReceived++
+					DPrintf("%v get vote from %v", rf.me, ind)
+					if rf.votesReceived > len(rf.peers) / 2 {
+						rf.convertToLeader()
+					}
+				}
+			}
+			rf.mu.Unlock()
+		}(i)
+	}
+}
 
 type AppendEntriesArgs struct {
 	Term         int
 	LeaderId     int
-	PervLogIndex int
+	PrevLogIndex int
 	PrevLogTerm  int
 	Entries      []LogEntry
 	LeaderCommit int
@@ -219,14 +262,48 @@ type AppendEntriesReply struct {
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 
 	//TODO:
-	if args.Term > rf.currentTerm {
-		rf.role = FOLLOWER;
+	DPrintf("%v get appendEntries from %v of term %v", rf.me, args.LeaderId, args.Term)
+	reply.Success = false
+	rf.mu.Lock()
+	DPrintf("fanjbhhhhhhhubvjabfskjdfanvailnvnwuovbnak;vmao;niwenv")
+	rf.checkConvertToFollower(args.Term)
+	if args.Term >= rf.currentTerm {
+		reply.Success = true
+		rf.appendEntriesCh <- true
 	}
+	reply.Term = rf.currentTerm
+	rf.mu.Unlock()
 }
+
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	return ok
+}
+
+func (rf *Raft) broadcastAppendEntries()  {
+	//TODO:
+	rf.mu.Lock()
+	args := AppendEntriesArgs{
+		Term:rf.currentTerm,
+		LeaderId:rf.me,
+		PrevLogIndex:0,
+		PrevLogTerm:0,
+		Entries:nil,
+		LeaderCommit:rf.commitIndex,
+	}
+	rf.mu.Unlock()
+	DPrintf("%v broadcasting appendEntries. %v", rf.me, rf.role)
+	for i := range rf.peers {
+		if i == rf.me {
+			continue
+		}
+		go func(ind int){
+			reply := AppendEntriesReply{}
+			rf.sendAppendEntries(ind, &args, &reply)
+			rf.checkConvertToFollower(reply.Term)
+		}(i)
+	}
 }
 
 func (rf *Raft) getLastLogTerm() int {
@@ -268,20 +345,75 @@ func (rf *Raft) Kill() {
 	// Your code here, if desired.
 }
 
-func (rf *Raft) startElection() {
-
+func dropAndSet(ch chan bool)  {
+	select {
+	case <- ch:
+	default:
+	}
+	ch <- true
 }
 
-func (rf *Raft) electionDaemon() {
-	for {
-		swith rf.role {
-			case LEADER
-		}
+func (rf *Raft) checkConvertToFollower(argsTerm int) {
+	if argsTerm > rf.currentTerm {
+		DPrintf("%v convert to follower", rf.me)
+		rf.role = FOLLOWER
+		rf.currentTerm = argsTerm
+		rf.votedFor = -1
 	}
 }
 
-func (rf *Raft) heartbeatDaemon() {
+func (rf *Raft) convertToCandidate()  {
+	rf.mu.Lock()
+	DPrintf("%v convert to candidate", rf.me)
+	rf.role = CANDIDATE
+	rf.currentTerm++
+	rf.votedFor = rf.me
+	rf.broadcastRequestVote()
+	rf.mu.Unlock()
+}
 
+func (rf *Raft) convertToLeader()  {
+	//TODO:
+	if rf.role == CANDIDATE {
+		rf.role = LEADER
+		DPrintf("%v convert to leader", rf.me)
+	}
+	dropAndSet(rf.becomeLeaderCh)
+}
+
+func getRandomElectionTimeout() time.Duration {
+	// get random timeout between 500 and 600 milliseconds
+	return time.Duration(500 + rand.Intn(100)) * time.Millisecond
+}
+
+func (rf *Raft) stateDaemon() {
+	for {
+		rf.mu.Lock()
+		role := rf.role
+		rf.mu.Unlock()
+		electionTimeout := getRandomElectionTimeout()
+		switch role {
+		case FOLLOWER:
+			select {
+			case <- rf.appendEntriesCh:
+			case <- rf.grantVoteCh:
+			case <- time.After(electionTimeout):
+				rf.convertToCandidate()
+			}
+		case CANDIDATE:
+			select {
+			case <- rf.appendEntriesCh:
+			case <- rf.grantVoteCh:
+			case <- rf.becomeLeaderCh:
+			case <- time.After(electionTimeout):
+				rf.convertToCandidate()
+			}
+		// TODO:
+		case LEADER:
+			rf.broadcastAppendEntries()
+			time.Sleep(HEARTBEAT_INTERVAL)
+		}
+	}
 }
 
 //
@@ -304,9 +436,23 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// Your initialization code here (2A, 2B, 2C).
 	//TODO:
+	rf.currentTerm = 0
+	rf.votedFor	= -1
+	rf.log = make([]LogEntry, 0)
+	rf.log = append(rf.log, LogEntry{Term: 0, Index:0})
 
-	go rf.electionDaemon()
-	go rf.heartbeatDaemon()
+	rf.commitIndex = 0
+	rf.lastApplied = 0
+
+	rf.role = FOLLOWER
+
+	rf.votesReceived = 0
+	rf.appendEntriesCh = make(chan bool, 1)
+	rf.grantVoteCh = make(chan bool, 1)
+	rf.becomeLeaderCh = make(chan bool, 1)
+
+
+	go rf.stateDaemon()
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
