@@ -92,7 +92,8 @@ func (rf *Raft) GetState() (int, bool) {
 	//var term int
 	//var isleader bool
 	// Your code here (2A).
-
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	return rf.currentTerm, rf.role == LEADER
 }
 
@@ -215,18 +216,21 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 
 func (rf *Raft) broadcastRequestVote()  {
 	//TODO:
-	args := RequestVoteArgs{
-		Term:rf.currentTerm,
-		CandidateId:rf.me,
-		LastLogIndex:rf.getLastLogIndex(),
-		LastLogTerm:rf.getLastLogTerm(),
-	}
+	currentTerm := rf.currentTerm
 	rf.votesReceived = 1
 	for i := range rf.peers {
 		if i == rf.me {
 			continue
 		}
-		go func(ind int){
+		go func(ind int, currentTerm int){
+			rf.mu.Lock()
+			args := RequestVoteArgs{
+				Term:currentTerm,
+				CandidateId:rf.me,
+				LastLogIndex:rf.getLastLogIndex(),
+				LastLogTerm:rf.getLastLogTerm(),
+			}
+			rf.mu.Unlock()
 			reply := RequestVoteReply{}
 			rf.sendRequestVote(ind, &args, &reply)
 			rf.mu.Lock()
@@ -241,7 +245,7 @@ func (rf *Raft) broadcastRequestVote()  {
 				}
 			}
 			rf.mu.Unlock()
-		}(i)
+		}(i, currentTerm)
 	}
 }
 
@@ -262,17 +266,18 @@ type AppendEntriesReply struct {
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 
 	//TODO:
-	DPrintf("%v get appendEntries from %v of term %v", rf.me, args.LeaderId, args.Term)
 	reply.Success = false
 	rf.mu.Lock()
-	DPrintf("fanjbhhhhhhhubvjabfskjdfanvailnvnwuovbnak;vmao;niwenv")
+	DPrintf("%v get appendEntries from %v of term %v", rf.me, args.LeaderId, args.Term)
 	rf.checkConvertToFollower(args.Term)
-	if args.Term >= rf.currentTerm {
+	currentTerm := rf.currentTerm
+	reply.Term = currentTerm
+	rf.mu.Unlock()
+	if args.Term >= currentTerm {
 		reply.Success = true
 		rf.appendEntriesCh <- true
 	}
-	reply.Term = rf.currentTerm
-	rf.mu.Unlock()
+
 }
 
 
@@ -283,26 +288,29 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 
 func (rf *Raft) broadcastAppendEntries()  {
 	//TODO:
-	rf.mu.Lock()
-	args := AppendEntriesArgs{
-		Term:rf.currentTerm,
-		LeaderId:rf.me,
-		PrevLogIndex:0,
-		PrevLogTerm:0,
-		Entries:nil,
-		LeaderCommit:rf.commitIndex,
-	}
-	rf.mu.Unlock()
+	currentTerm := rf.currentTerm
 	DPrintf("%v broadcasting appendEntries. %v", rf.me, rf.role)
 	for i := range rf.peers {
 		if i == rf.me {
 			continue
 		}
-		go func(ind int){
+		go func(ind int, currentTerm int){
+			rf.mu.Lock()
+			args := AppendEntriesArgs{
+				Term:currentTerm,
+				LeaderId:rf.me,
+				PrevLogIndex:0,
+				PrevLogTerm:0,
+				Entries:nil,
+				LeaderCommit:rf.commitIndex,
+			}
+			rf.mu.Unlock()
 			reply := AppendEntriesReply{}
 			rf.sendAppendEntries(ind, &args, &reply)
+			rf.mu.Lock()
 			rf.checkConvertToFollower(reply.Term)
-		}(i)
+			rf.mu.Unlock()
+		}(i, currentTerm)
 	}
 }
 
@@ -364,11 +372,13 @@ func (rf *Raft) checkConvertToFollower(argsTerm int) {
 
 func (rf *Raft) convertToCandidate()  {
 	rf.mu.Lock()
-	DPrintf("%v convert to candidate", rf.me)
-	rf.role = CANDIDATE
-	rf.currentTerm++
-	rf.votedFor = rf.me
-	rf.broadcastRequestVote()
+	if rf.role != LEADER {
+		DPrintf("%v convert to candidate", rf.me)
+		rf.role = CANDIDATE
+		rf.currentTerm++
+		rf.votedFor = rf.me
+		rf.broadcastRequestVote()
+	}
 	rf.mu.Unlock()
 }
 
@@ -450,7 +460,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.appendEntriesCh = make(chan bool, 1)
 	rf.grantVoteCh = make(chan bool, 1)
 	rf.becomeLeaderCh = make(chan bool, 1)
-
 
 	go rf.stateDaemon()
 
