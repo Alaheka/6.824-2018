@@ -54,8 +54,9 @@ type ApplyMsg struct {
 }
 
 type LogEntry struct {
-	Term  int
-	Index int
+	Term  	int
+	Index 	int
+	Command	interface{}
 }
 //
 // A Go object implementing a single Raft peer.
@@ -77,8 +78,10 @@ type Raft struct {
 	commitIndex	int
 	lastApplied	int
 
-	role 		RoleType
+	nextIndex	[]int
+	matchIndex	[]int
 
+	role 		RoleType
 	votesReceived	int
 	appendEntriesCh	chan bool
 	grantVoteCh		chan bool
@@ -215,22 +218,20 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 }
 
 func (rf *Raft) broadcastRequestVote()  {
-	//TODO:
-	currentTerm := rf.currentTerm
+	//currentTerm := rf.currentTerm
+	args := RequestVoteArgs{
+		Term:rf.currentTerm,
+		CandidateId:rf.me,
+		LastLogIndex:rf.getLastLogIndex(),
+		LastLogTerm:rf.getLastLogTerm(),
+	}
 	rf.votesReceived = 1
 	for i := range rf.peers {
 		if i == rf.me {
 			continue
 		}
-		go func(ind int, currentTerm int){
-			rf.mu.Lock()
-			args := RequestVoteArgs{
-				Term:currentTerm,
-				CandidateId:rf.me,
-				LastLogIndex:rf.getLastLogIndex(),
-				LastLogTerm:rf.getLastLogTerm(),
-			}
-			rf.mu.Unlock()
+		go func(ind int, args RequestVoteArgs){
+
 			reply := RequestVoteReply{}
 			rf.sendRequestVote(ind, &args, &reply)
 			rf.mu.Lock()
@@ -245,7 +246,7 @@ func (rf *Raft) broadcastRequestVote()  {
 				}
 			}
 			rf.mu.Unlock()
-		}(i, currentTerm)
+		}(i, args)
 	}
 }
 
@@ -272,14 +273,20 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.checkConvertToFollower(args.Term)
 	currentTerm := rf.currentTerm
 	reply.Term = currentTerm
-	rf.mu.Unlock()
 	if args.Term >= currentTerm {
-		reply.Success = true
-		rf.appendEntriesCh <- true
-	}
+		dropAndSet(rf.appendEntriesCh)
+		if rf.log[args.PrevLogIndex].Term == args.PrevLogTerm {
+			reply.Success = true
+			
+		}
 
+	}
+	rf.mu.Unlock()
 }
 
+func (rf *Raft) advanceCommitIndex()  {
+
+}
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
@@ -288,29 +295,29 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 
 func (rf *Raft) broadcastAppendEntries()  {
 	//TODO:
-	currentTerm := rf.currentTerm
-	DPrintf("%v broadcasting appendEntries. %v", rf.me, rf.role)
+	//currentTerm := rf.currentTerm
+	rf.mu.Lock()
+	args := AppendEntriesArgs{
+		Term:rf.currentTerm,
+		LeaderId:rf.me,
+		PrevLogIndex:0,
+		PrevLogTerm:0,
+		Entries:nil,
+		LeaderCommit:rf.commitIndex,
+	}
+	rf.mu.Unlock()
+	DPrintf("%v broadcasting appendEntries.", rf.me)
 	for i := range rf.peers {
 		if i == rf.me {
 			continue
 		}
-		go func(ind int, currentTerm int){
-			rf.mu.Lock()
-			args := AppendEntriesArgs{
-				Term:currentTerm,
-				LeaderId:rf.me,
-				PrevLogIndex:0,
-				PrevLogTerm:0,
-				Entries:nil,
-				LeaderCommit:rf.commitIndex,
-			}
-			rf.mu.Unlock()
+		go func(ind int, args AppendEntriesArgs){
 			reply := AppendEntriesReply{}
 			rf.sendAppendEntries(ind, &args, &reply)
 			rf.mu.Lock()
 			rf.checkConvertToFollower(reply.Term)
 			rf.mu.Unlock()
-		}(i, currentTerm)
+		}(i, args)
 	}
 }
 
@@ -339,6 +346,16 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (2B).
+	// TODO:
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	isLeader = rf.role == LEADER
+	if isLeader {
+		index = rf.getLastLogIndex() + 1
+		term = rf.currentTerm
+		newLog := LogEntry{Index:index, Term:term, Command:command}
+		rf.log = append(rf.log, newLog)
+	}
 
 	return index, term, isLeader
 }
@@ -386,14 +403,23 @@ func (rf *Raft) convertToLeader()  {
 	//TODO:
 	if rf.role == CANDIDATE {
 		rf.role = LEADER
+		rf.nextIndex = make([]int, len(rf.peers))
+		leaderLastIndex := rf.getLastLogIndex()
+		for i := range rf.nextIndex {
+			rf.nextIndex[i] = leaderLastIndex + 1
+		}
+		rf.matchIndex = make([]int, len(rf.peers))
+		for i := range rf.matchIndex {
+			rf.matchIndex[i] = 0
+		}
 		DPrintf("%v convert to leader", rf.me)
+		dropAndSet(rf.becomeLeaderCh)
 	}
-	dropAndSet(rf.becomeLeaderCh)
 }
 
 func getRandomElectionTimeout() time.Duration {
 	// get random timeout between 500 and 600 milliseconds
-	return time.Duration(500 + rand.Intn(100)) * time.Millisecond
+	return time.Duration(500 + rand.Intn(200)) * time.Millisecond
 }
 
 func (rf *Raft) stateDaemon() {
@@ -418,10 +444,9 @@ func (rf *Raft) stateDaemon() {
 			case <- time.After(electionTimeout):
 				rf.convertToCandidate()
 			}
-		// TODO:
 		case LEADER:
 			rf.broadcastAppendEntries()
-			time.Sleep(HEARTBEAT_INTERVAL)
+			time.Sleep(HEARTBEAT_INTERVAL*time.Millisecond)
 		}
 	}
 }
