@@ -112,7 +112,6 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		}(ck.leader)
 		select {
 		case ok := <- done:
-			//DPrintf("received %v", reply)
 			if ok && !reply.WrongLeader && reply.Err == OK {
 				ck.seqNo++
 				return

@@ -175,7 +175,6 @@ func (kv *KVServer) applyDaemon()  {
 		kv.mu.Lock()
 		if !msg.CommandValid {
 			//TODO: snapshot
-			log.Printf("catch up")
 			kv.readSnapshot(msg.SnapshotData)
 		} else {
 			op := msg.Command.(Op)

@@ -25,7 +25,6 @@ import (
 	"sort"
 	"bytes"
 	"labgob"
-	"log"
 )
 
 func minInt(x, y int) int {
@@ -176,7 +175,7 @@ func (rf *Raft) Snapshot(lastIncludedIndex int, data []byte)  {
 	} else {
 		panic("snapshot error")
 	}
-	log.Printf("%v snapshot %v", rf.me, rf.lastSnapshotIndex)
+	//log.Printf("%v snapshot %v", rf.me, rf.lastSnapshotIndex)
 	rf.persister.SaveStateAndSnapshot(rf.getPersistData(), data)
 }
 
@@ -364,7 +363,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.Term >= currentTerm {
 		dropAndSet(rf.appendEntriesCh)
 		//if rf.getLastLogIndex() >= args.PrevLogIndex && ((rf.getRelativeIndex(args.PrevLogIndex) < 0 && rf.lastSnapshotTerm == args.PrevLogTerm) || (rf.getRelativeIndex(args.PrevLogIndex) >= 0 && rf.log[rf.getRelativeIndex(args.PrevLogIndex)].Term == args.PrevLogTerm)) {
-		log.Printf("%v %v append entries %v %v %v %v ", rf.me, args.LeaderId, rf.lastSnapshotIndex, args.PrevLogIndex, rf.getRelativeIndex(args.PrevLogIndex), len(rf.log))
+		//log.Printf("%v %v append entries %v %v %v %v ", rf.me, args.LeaderId, rf.lastSnapshotIndex, args.PrevLogIndex, rf.getRelativeIndex(args.PrevLogIndex), len(rf.log))
 		if rf.getRelativeIndex(args.PrevLogIndex) < 0 {
 			reply.Success = true
 		} else if rf.getLastLogIndex() >= args.PrevLogIndex && rf.log[rf.getRelativeIndex(args.PrevLogIndex)].Term == args.PrevLogTerm {
@@ -425,7 +424,6 @@ func (rf *Raft) broadcastAppendEntries()  {
 		go func(ind int, currentTerm int){
 			// TODO: may need send installsnapshot instead of appendEntries
 			rf.mu.Lock()
-			//log.Printf("%v enter append %v lock1", rf.me, ind)
 			LOOP: if rf.role == LEADER && rf.currentTerm == currentTerm {
 
 				if rf.getRelativeIndex(rf.nextIndex[ind]) < 1 {
@@ -449,22 +447,14 @@ func (rf *Raft) broadcastAppendEntries()  {
 				} else {
 					entries := make([]LogEntry, 0)
 					entries = append(entries, rf.log[rf.getRelativeIndex(rf.nextIndex[ind]):]...)
-					prevLogIndex := rf.nextIndex[ind] - 1
-					var prevLogTerm int
-					//if rf.getRelativeIndex(prevLogIndex) < 0 {
-					//	prevLogTerm = rf.lastSnapshotTerm
-					//} else {
-						prevLogTerm = rf.log[rf.getRelativeIndex(prevLogIndex)].Term
-					//}
 					args := AppendEntriesArgs{
 						Term:         currentTerm,
 						LeaderId:     rf.me,
-						PrevLogIndex: prevLogIndex,
-						PrevLogTerm:  prevLogTerm,
+						PrevLogIndex: rf.nextIndex[ind] - 1,
+						PrevLogTerm:  rf.log[rf.getRelativeIndex(rf.nextIndex[ind] - 1)].Term,
 						Entries:      entries,
 						LeaderCommit: rf.commitIndex,
 					}
-					//log.Printf("%v release append %v lock2", rf.me, ind)
 					rf.mu.Unlock()
 					reply := AppendEntriesReply{}
 					rf.sendAppendEntries(ind, &args, &reply)
@@ -488,22 +478,19 @@ func (rf *Raft) broadcastAppendEntries()  {
 					}
 				}
 			}
-			//log.Printf("%v release append %v lock4", rf.me, ind)
 			rf.mu.Unlock()
 		}(i, currentTerm)
 	}
 }
 
 func (rf *Raft) advanceCommitIndex()  {
-	//log.Printf("%v enter advanceCommitIndex111", rf.me)
 	matchIndexCopy := make([]int, 0)
 	matchIndexCopy = append(matchIndexCopy, rf.matchIndex...)
 	matchIndexCopy[rf.me] = rf.getLastLogIndex()
 	sort.Ints(matchIndexCopy)
 	N := matchIndexCopy[(len(rf.matchIndex) - 1) / 2]
-	log.Printf("%v %v %v", rf.me, rf.getRelativeIndex(N), N)
+	//log.Printf("%v %v %v", rf.me, rf.getRelativeIndex(N), N)
 	if N > rf.commitIndex && rf.log[rf.getRelativeIndex(N)].Term == rf.currentTerm {
-		//log.Printf("%v enter advanceCommitIndex222", rf.me)
 		rf.commitIndex = N
 		dropAndSet(rf.notifyApplyCh)
 	}
@@ -669,7 +656,6 @@ func (rf *Raft) applyDaemon() {
 			}
 			snapshotIndex := rf.lastSnapshotIndex
 			rf.mu.Unlock()
-			log.Printf("let server catch up")
 			rf.applyCh <- msg
 			rf.mu.Lock()
 			rf.lastApplied = snapshotIndex
