@@ -53,11 +53,8 @@ type KVServer struct {
 
 func (kv *KVServer) AppendOp(op Op) bool {
 	kv.mu.Lock()
-	//log.Printf("%v enter lock 1 %v", kv.me, op)
-	DPrintf("%v enter lock", kv.me)
 	index, _, isLeader := kv.rf.Start(op)
 	if !isLeader {
-		//log.Printf("%v release lock 11", kv.me)
 		kv.mu.Unlock()
 		return false
 	}
@@ -65,7 +62,6 @@ func (kv *KVServer) AppendOp(op Op) bool {
 	DPrintf("server is leader")
 	waitCh := make(chan Op, 1)
 	kv.waitChs[index] = waitCh
-	//log.Printf("%v release lock 12", kv.me)
 	kv.mu.Unlock()
 	select {
 	case returnedOp := <- waitCh:
@@ -96,7 +92,6 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	ok := kv.AppendOp(op)
 	kv.mu.Lock()
 
-	//log.Printf("%v enter lock 2", kv.me)
 	defer kv.mu.Unlock()
 	if ok {
 		if v, ok2 := kv.KvStore[op.Key]; ok2 {
@@ -117,7 +112,6 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	DPrintf("%v server get PutAppend %v", kv.me, args)
 	reply.Err = OK
 	kv.mu.Lock()
-	//log.Printf("%v enter lock 3", kv.me)
 	if hasDup := kv.checkDup(args.Id, args.SeqNo); hasDup {
 		kv.mu.Unlock()
 		reply.WrongLeader = false
